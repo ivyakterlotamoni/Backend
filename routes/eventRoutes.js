@@ -8,10 +8,18 @@ const router = express.Router();
 // GET: All upcoming events
 router.get("/", async (req, res) => {
   try {
-    const events = await eventsCollection()
+    const limit = Number.parseInt(req.query.limit, 10);
+
+    let query = eventsCollection()
       .find({ date: { $gte: new Date().toISOString() } })
-      .sort({ date: 1 })
-      .toArray();
+      .sort({ date: 1 });
+
+    // Apply limit only when a valid limit is provided
+    if (Number.isInteger(limit) && limit > 0) {
+      query = query.limit(limit);
+    }
+
+    const events = await query.toArray();
 
     res.status(200).json(events);
   } catch (error) {
