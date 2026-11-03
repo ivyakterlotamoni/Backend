@@ -2,10 +2,11 @@
 import express from "express";
 import { ObjectId } from "mongodb";
 import eventsCollection from "../models/Event.js";
+import verifyToken from "../middleware/verifyToken.js";
 
 const router = express.Router();
 
-// GET: All upcoming events
+// GET: All upcoming events (Public)
 router.get("/", async (req, res) => {
   try {
     const limit = Number.parseInt(req.query.limit, 10);
@@ -28,20 +29,28 @@ router.get("/", async (req, res) => {
   }
 });
 
-// GET: Joined events by user email
-// Keep this route before GET /:id
-router.get("/joined/:email", async (req, res) => {
+// GET: Joined events (Protected)
+router.get("/joined/:email", verifyToken, async (req, res) => {
   try {
-    const email = req.params.email;
+    const authenticatedEmail = req.user?.email;
+    const requestedEmail = req.params.email;
 
-    if (!email) {
-      return res.status(400).json({
-        message: "User email is required",
+    if (!authenticatedEmail) {
+      return res.status(403).json({
+        message: "User email not found in token",
+      });
+    }
+
+    if (
+      authenticatedEmail.toLowerCase() !== requestedEmail.toLowerCase()
+    ) {
+      return res.status(403).json({
+        message: "You can only view your own joined events",
       });
     }
 
     const events = await eventsCollection()
-      .find({ "joinedUsers.email": email })
+      .find({ "joinedUsers.email": authenticatedEmail })
       .sort({ date: 1 })
       .toArray();
 
@@ -54,7 +63,7 @@ router.get("/joined/:email", async (req, res) => {
   }
 });
 
-// GET: Single event by ID
+// GET: Single event (Public)
 router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -84,8 +93,8 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-// POST: Create new event
-router.post("/", async (req, res) => {
+// POST: Create event (Protected)
+router.post("/", verifyToken, async (req, res) => {
   try {
     const {
       title,
@@ -94,8 +103,15 @@ router.post("/", async (req, res) => {
       thumbnail,
       location,
       date,
-      creatorEmail,
     } = req.body;
+
+    const creatorEmail = req.user?.email;
+
+    if (!creatorEmail) {
+      return res.status(403).json({
+        message: "User email not found in token",
+      });
+    }
 
     if (
       !title ||
@@ -103,8 +119,7 @@ router.post("/", async (req, res) => {
       !eventType ||
       !thumbnail ||
       !location ||
-      !date ||
-      !creatorEmail
+      !date
     ) {
       return res.status(400).json({
         message: "Please provide all required fields",
@@ -151,26 +166,23 @@ router.post("/", async (req, res) => {
   }
 });
 
-// PUT: Update an event
-router.put("/:id", async (req, res) => {
+// POST: Join event (Protected)
+router.post("/:id/join", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const {
-      title,
-      description,
-      eventType,
-      thumbnail,
-      location,
-      date,
-      creatorEmail,
-    } = req.body;
+    const userEmail = req.user?.email;
+    const userName = req.user?.name || "";
 
     if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ message: "Invalid event ID" });
+      return res.status(400).json({
+        message: "Invalid event ID",
+      });
     }
 
-    if (!creatorEmail) {
-      return res.status(400).json({ message: "Creator email is required" });
+    if (!userEmail) {
+      return res.status(403).json({
+        message: "User email not found in token",
+      });
     }
 
     const collection = eventsCollection();
@@ -180,10 +192,93 @@ router.put("/:id", async (req, res) => {
     });
 
     if (!event) {
-      return res.status(404).json({ message: "Event not found" });
+      return res.status(404).json({
+        message: "Event not found",
+      });
     }
 
-    if (event.creatorEmail !== creatorEmail) {
+    if (new Date(event.date) <= new Date()) {
+      return res.status(400).json({
+        message: "You cannot join a past event",
+      });
+    }
+
+    const result = await collection.updateOne(
+      {
+        _id: new ObjectId(id),
+        date: { $gt: new Date().toISOString() },
+        "joinedUsers.email": { $ne: userEmail },
+      },
+      {
+        $push: {
+          joinedUsers: {
+            email: userEmail,
+            name: userName,
+            joinedAt: new Date().toISOString(),
+          },
+        },
+      }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(409).json({
+        message: "You have already joined this event",
+      });
+    }
+
+    res.status(200).json({
+      message: "Successfully joined the event",
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to join event",
+      error: error.message,
+    });
+  }
+});
+
+// PUT: Update own event (Protected)
+router.put("/:id", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      title,
+      description,
+      eventType,
+      thumbnail,
+      location,
+      date,
+    } = req.body;
+
+    const creatorEmail = req.user?.email;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
+        message: "Invalid event ID",
+      });
+    }
+
+    if (!creatorEmail) {
+      return res.status(403).json({
+        message: "User email not found in token",
+      });
+    }
+
+    const collection = eventsCollection();
+
+    const event = await collection.findOne({
+      _id: new ObjectId(id),
+    });
+
+    if (!event) {
+      return res.status(404).json({
+        message: "Event not found",
+      });
+    }
+
+    if (
+      event.creatorEmail.toLowerCase() !== creatorEmail.toLowerCase()
+    ) {
       return res.status(403).json({
         message: "You can only update your own event",
       });
@@ -237,19 +332,21 @@ router.put("/:id", async (req, res) => {
   }
 });
 
-// DELETE: Delete an event
-router.delete("/:id", async (req, res) => {
+// DELETE: Delete own event (Protected)
+router.delete("/:id", verifyToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { creatorEmail } = req.body;
+    const creatorEmail = req.user?.email;
 
     if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ message: "Invalid event ID" });
+      return res.status(400).json({
+        message: "Invalid event ID",
+      });
     }
 
     if (!creatorEmail) {
-      return res.status(400).json({
-        message: "Creator email is required",
+      return res.status(403).json({
+        message: "User email not found in token",
       });
     }
 
@@ -265,7 +362,9 @@ router.delete("/:id", async (req, res) => {
       });
     }
 
-    if (event.creatorEmail !== creatorEmail) {
+    if (
+      event.creatorEmail.toLowerCase() !== creatorEmail.toLowerCase()
+    ) {
       return res.status(403).json({
         message: "You can only delete your own event",
       });
@@ -281,76 +380,6 @@ router.delete("/:id", async (req, res) => {
   } catch (error) {
     res.status(500).json({
       message: "Failed to delete event",
-      error: error.message,
-    });
-  }
-});
-
-// POST: Join an event
-router.post("/:id/join", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { userEmail, userName } = req.body;
-
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({
-        message: "Invalid event ID",
-      });
-    }
-
-    if (!userEmail) {
-      return res.status(400).json({
-        message: "User email is required",
-      });
-    }
-
-    const collection = eventsCollection();
-
-    const event = await collection.findOne({
-      _id: new ObjectId(id),
-    });
-
-    if (!event) {
-      return res.status(404).json({
-        message: "Event not found",
-      });
-    }
-
-    if (new Date(event.date) <= new Date()) {
-      return res.status(400).json({
-        message: "You cannot join a past event",
-      });
-    }
-
-    const result = await collection.updateOne(
-      {
-        _id: new ObjectId(id),
-        date: { $gt: new Date().toISOString() },
-        "joinedUsers.email": { $ne: userEmail },
-      },
-      {
-        $push: {
-          joinedUsers: {
-            email: userEmail,
-            name: userName || "",
-            joinedAt: new Date().toISOString(),
-          },
-        },
-      }
-    );
-
-    if (result.modifiedCount === 0) {
-      return res.status(409).json({
-        message: "You have already joined this event",
-      });
-    }
-
-    res.status(200).json({
-      message: "Successfully joined the event",
-    });
-  } catch (error) {
-    res.status(500).json({
-      message: "Failed to join event",
       error: error.message,
     });
   }
